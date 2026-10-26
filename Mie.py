@@ -181,8 +181,8 @@ def dB_lambda_dT(wavelength_um, temp):
     '''
     Temperature derivative of blackbody spectral radiance.
 
-    wavelength_um == Wavelength in micrometres [um] - array
-    temp          ==      Temperature in kelvin (K) - float
+    wavelength_um        ==        Wavelength in micrometres [um] - array
+    temp                 ==             Temperature in kelvin (K) - float
 
     Returns
     array (same legnth as the wavelengths array)
@@ -299,7 +299,26 @@ def MRN(r, cutoff_low = 0.005, cutoff_high = 2.5, total = 1):
   return n
 
 
+def pwr_law(r, slope ,cutoff_low = 0.005, cutoff_high = 2.5, total = 1):
+  '''
+  Generalised power law function. only valid for negative power laws - will force input to negatives
 
+  radii are to be given in micrometers
+
+  r      ==   radius of dust grain [um]     - array
+  slope  ==   power law of dist (negative)  - float
+  '''
+
+  used_slope = abs(float(slope))
+
+  n = np.zeros(len(r))
+
+  mask = np.where((cutoff_low <= r) & (r < cutoff_high))
+  n[mask] = r[mask]**(-used_slope)
+
+  #Normilize so integral goes to "total"
+  n[mask] /= total * (used_slope-1.0) * (cutoff_low**(1.0-used_slope)  -  cutoff_high**(1-used_slope))
+  return n
 
 
 ########################################################
