@@ -14,6 +14,20 @@ from tqdm import tqdm
 #    General functions
 ###################################################################################################
 
+def loglin_extrapolate(x, y, x_new):
+  x3 = x_new
+  x2 = x[-1]
+  x1 = x[-2]
+
+  y2 = y[-1]
+  y1 = y[-2]
+  y3 = y2*(y2/y1)**((x3-x2) / (x2-x1))
+
+  return (y3)
+
+  
+  
+
 #################################################
 # interpolate a set of complex refractive indices
 #################################################
@@ -23,6 +37,17 @@ def interp_m(wv, n, k, wv_range = [1e-5, 50], num_points = 200, wv_exact = [0.0]
 
   if wv_range[1] > max(wv):
     print('WARNING: Max wavelength outside interpolation range - expect shananigans')
+    print('Past limits of reference data, a slope is extrapolated to continue the set.')
+
+    #find the slope at last few points
+
+    n_new = loglin_extrapolate(wv, n, wv_range[1])
+    k_new = loglin_extrapolate(wv, k, wv_range[1])
+
+    wv = np.hstack((wv, np.array([wv_range[1]])))
+    n = np.hstack((n,n_new))
+    k = np.hstack((k, k_new))
+
 
   wv_range1 = np.log10(wv_range)
   interp_n = CubicSpline(wv, n)
