@@ -25,7 +25,84 @@ def loglin_extrapolate(x, y, x_new):
 
   return (y3)
 
-  
+def extrapolate_power_law(x, y, n_fit=5, n_extra=20, x_end=None, direction="high",):
+    """
+    Extrapolate a power law using a linear fit in log-log space.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Existing data. Must be positive for log-log extrapolation.
+    n_fit : int
+        Number of points at the selected end used to estimate the slope.
+    n_extra : int
+        Number of extrapolated points to generate.
+    x_end : float or None
+        Final x value of the extrapolation. If None, extend by the
+        same logarithmic spacing as the existing data.
+    direction : {"high", "low"}
+        "high": extrapolate toward larger x.
+        "low": extrapolate toward smaller x.
+
+    Returns
+    -------
+    x_extended, y_extended : ndarray
+        Original and extrapolated data, sorted by x.
+    slope, intercept : float
+        Fit parameters for log10(y) = slope*log10(x) + intercept.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if x.ndim != 1 or y.ndim != 1 or len(x) != len(y):
+        raise ValueError("x and y must be 1D arrays of equal length.")
+    if len(x) < 2:
+        raise ValueError("At least two data points are required.")
+    if np.any(x <= 0) or np.any(y <= 0):
+        raise ValueError("All x and y values must be positive for log-log fitting.")
+    if direction not in ("high", "low"):
+        raise ValueError("direction must be 'high' or 'low'.")
+    if not 2 <= n_fit <= len(x):
+        raise ValueError("n_fit must be between 2 and the number of data points.")
+    if n_extra < 1:
+        raise ValueError("n_extra must be at least 1.")
+
+    # Sort data by x and check for duplicate x values.
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if np.any(np.diff(x) <= 0):
+        raise ValueError("x values must be unique.")
+
+    # Select the points at the end being extrapolated.
+    if direction == "high":
+        x_fit, y_fit = x[-n_fit:], y[-n_fit:]
+        x_boundary = x[-1]
+        if x_end is None:
+            log_step = np.median(np.diff(np.log10(x)))
+            x_end = 10 ** (np.log10(x_boundary) + log_step * n_extra)
+        if x_end <= x_boundary:
+            raise ValueError("For direction='high', x_end must exceed max(x).")
+    else:
+        x_fit, y_fit = x[:n_fit], y[:n_fit]
+        x_boundary = x[0]
+        if x_end is None:
+            log_step = np.median(np.diff(np.log10(x)))
+            x_end = 10 ** (np.log10(x_boundary) - log_step * n_extra)
+        if x_end >= x_boundary or x_end <= 0:
+            raise ValueError("For direction='low', x_end must be positive and below min(x).")
+
+    # Fit log10(y) = slope*log10(x) + intercept.
+    slope, intercept = np.polyfit(np.log10(x_fit), np.log10(y_fit), 1)
+
+    # Generate new points logarithmically spaced beyond the data boundary.
+    x_extra = np.geomspace(x_boundary, x_end, n_extra + 1)[1:]
+    y_extra = 10 ** (slope * np.log10(x_extra) + intercept)
+
+    x_extended = np.concatenate([x, x_extra])
+    y_extended = np.concatenate([y, y_extra])
+    return x_extended, y_extended, slope, intercept
+
+
   
 
 #################################################
@@ -41,13 +118,8 @@ def interp_m(wv, n, k, wv_range = [1e-5, 50], num_points = 200, wv_exact = [0.0]
 
     #find the slope at last few points
 
-    n_new = loglin_extrapolate(wv, n, wv_range[1])
-    k_new = loglin_extrapolate(wv, k, wv_range[1])
-
-    wv = np.hstack((wv, np.array([wv_range[1]])))
-    n = np.hstack((n,n_new))
-    k = np.hstack((k, k_new))
-
+    _, n, _,_ = extrapolate_power_law(wv, n, n_fit=5, n_extra=20, x_end=wv_range[1], direction="high",)
+    wv, k, _,_ = extrapolate_power_law(wv, k, n_fit=5, n_extra=20, x_end=wv_range[1], direction="high",)
 
   wv_range1 = np.log10(wv_range)
   interp_n = CubicSpline(wv, n)
@@ -277,6 +349,224 @@ def B_lambda(wavelength_um, temp):
     return np.array(result)
 
 
+##############################################################
+#   Mean opacity calculations
+def get_rosseland(a, wave, n, T, interpolation, fractions = [0.53, 0.47], species = ['base']):
+  '''
+  get rosseland mean opacity
+
+  input:
+  a         == grain radii [um]   - array
+  wave      == wavelength  [um]   - array
+  n         == grain distribution - function (eg, MRN)
+  T         == temperature        - float
+  fractions == species fractions  - list/array
+  species   == which dust to use  - list of strings
+
+  '''
+
+
+  if len(fractions) != len(species) and species[0] != 'base':
+    #cant have that mate
+    print('Dust fractions list and species list of differing length. Perhaps you missed an entry?')
+    return
+
+  # chose dust densities and decide what must have evaporated
+  if species[0] == 'base':
+    dust_bulk = [2.16] # graphite density in cgs units (Draine 1993, 2003)
+    fractions = [1.0]
+    #if T > 2273:
+    #  fractions[0] = 0.0
+#
+    #if T > 4000:
+    #  fractions[1] = 0.0
+
+  else:
+    if T > 2273 and any(species) == 'sic':
+      fractions[species == 'sic'] = 0.0
+
+    if T > 4000 and any(species) == 'gra':
+      fractions[species == 'gra'] = 0.0
+
+
+  ###########################
+  #     CONSTANTS
+  ###########################
+  c = 2.99792458e10   # um/s
+  h = 6.62607015e-27  # erg s
+  k = 1.380649e-16    # erg/K
+
+
+  #denominator is just what we have to divide by at the end, but here we want to do the integration over wavelength
+  denominator = dB_lambda_dT(wave, T) # this will be consolidated into a scalar after integration
+
+  avg_mass = 0.0
+  avg_cross_section = 0.0
+
+  for i in range(0, len(fractions)):
+    avg_mass += fractions[i]*dust_bulk[i]
+
+    # Evaluate Q_ext for every grain size and wavelength
+    A, WV = np.meshgrid(a, wave, indexing='ij')
+    coords = np.column_stack((A.ravel(), WV.ravel()))
+
+    vals = interpolation(coords)
+    Q_ext = vals[:, 1].reshape(A.shape)  # shape: (len(a), len(wave))
+
+    # Integrate over grain size for each wavelength
+    avg_cross_section += np.trapezoid(Q_ext * n(a)[:, None] * a[:, None]**2, a, axis=0)
+    #avg_cross_section += np.trapezoid(mie_interp(wv,a) *n(a)*a**2, a)
+
+  avg_mass *= np.trapezoid(n(a)*a**3, a)
+  #print(0.75 *avg_cross_section / avg_mass)
+
+  denominator_new = np.trapezoid(denominator* (avg_mass/avg_cross_section), wave)/0.75
+  numerator = np.trapezoid(dB_lambda_dT(wave, T), wave)
+
+
+  return 1e4 *numerator / denominator_new # the factor of 1e4 comes from conversion to cgs from um gs
+
+
+def get_planck(a, wave, n, T, interpolation, fractions = [0.53, 0.47], species = ['base']):
+  '''
+  get planck mean opacity
+
+  input:
+  a         == grain radii [um]   - array
+  wave      == wavelength  [um]   - array
+  n         == grain distribution - function (eg, MRN)
+  T         == temperature        - float
+  fractions == species fractions  - list/array
+  species   == which dust to use  - list of strings
+
+  '''
+
+
+  if len(fractions) != len(species) and species[0] != 'base':
+    #cant have that mate
+    print('Dust fractions list and species list of differing length. Perhaps you missed an entry?')
+    return
+
+  # chose dust densities and decide what must have evaporated
+  if species[0] == 'base':
+    dust_bulk = [2.16] # graphite density in cgs units (Draine 1993, 2003)
+    fractions = [1.0]
+
+
+  else:
+    if T > 2273 and any(species) == 'sic':
+      fractions[species == 'sic'] = 0.0
+
+    if T > 4000 and any(species) == 'gra':
+      fractions[species == 'gra'] = 0.0
+
+
+  ###########################
+  #     CONSTANTS
+  ###########################
+  c = 2.99792458e10   # um/s
+  h = 6.62607015e-27  # erg s
+  k = 1.380649e-16    # erg/K
+
+
+  #denominator is just what we have to divide by at the end, but here we want to do the integration over wavelength
+  B = B_lambda(wave, T) # this will be consolidated into a scalar after integration
+
+  avg_mass = 0.0
+  avg_cross_section = 0.0
+
+  for i in range(0, len(fractions)):
+    avg_mass += fractions[i]*dust_bulk[i]
+
+    # Evaluate Q_ext for every grain size and wavelength
+    A, WV = np.meshgrid(a, wave, indexing='ij')
+    coords = np.column_stack((A.ravel(), WV.ravel()))
+
+    vals = interpolation(coords)
+    Q_ext = vals[:, 1].reshape(A.shape)  # shape: (len(a), len(wave))
+
+    # Integrate over grain size for each wavelength
+    avg_cross_section += np.trapezoid(Q_ext * n(a)[:, None] * a[:, None]**2, a, axis=0)
+
+  avg_mass *= np.trapezoid(n(a)*a**3, a)
+
+  # Correct integration and division
+  numerator = np.trapezoid(avg_cross_section * B, wave) * 0.75 / avg_mass
+  denominator = np.trapezoid(B, wave, axis=0)
+
+  # 1e4 factor is the correct scale to convert from (um^2 / (g/cm^3 * um^3)) to (cm^2/g)
+  return 1e4 * numerator / denominator
+
+def get_planck_flipped(a, wave, n, T, interpolation, fractions = [0.53, 0.47], species = ['base']):
+  '''
+  get planck mean opacity
+
+  input:
+  a         == grain radii [um]   - array
+  wave      == wavelength  [um]   - array
+  n         == grain distribution - function (eg, MRN)
+  T         == temperature        - float
+  fractions == species fractions  - list/array
+  species   == which dust to use  - list of strings
+
+  '''
+
+
+  if len(fractions) != len(species) and species[0] != 'base':
+    #cant have that mate
+    print('Dust fractions list and species list of differing length. Perhaps you missed an entry?')
+    return
+
+  # chose dust densities and decide what must have evaporated
+  if species[0] == 'base':
+    dust_bulk = [2.16] # graphite density in cgs units (Draine 1993, 2003)
+    fractions = [1.0]
+
+
+  else:
+    if T > 2273 and any(species) == 'sic':
+      fractions[species == 'sic'] = 0.0
+
+    if T > 4000 and any(species) == 'gra':
+      fractions[species == 'gra'] = 0.0
+
+
+  ###########################
+  #     CONSTANTS
+  ###########################
+  c = 2.99792458e10   # um/s
+  h = 6.62607015e-27  # erg s
+  k = 1.380649e-16    # erg/K
+
+
+  #denominator is just what we have to divide by at the end, but here we want to do the integration over wavelength
+  B = B_lambda(wave, T) # this will be consolidated into a scalar after integration
+
+  avg_mass = 0.0
+  avg_cross_section = 0.0
+
+  for i in range(0, len(fractions)):
+    avg_mass += fractions[i]*dust_bulk[i]
+
+    # Evaluate Q_ext for every grain size and wavelength
+    A, WV = np.meshgrid(a, wave, indexing='ij')
+    coords = np.column_stack((A.ravel(), WV.ravel()))
+
+    vals = interpolation(coords)
+    Q_ext = vals[:, 1].reshape(A.shape)  # shape: (len(a), len(wave))
+
+    # Integrate over grain size for each wavelength
+    avg_cross_section += np.trapezoid(Q_ext * B, wave, axis = 1)
+
+  avg_mass *= np.trapezoid(n(a)*a**3, a)
+
+  # Correct integration and division
+  numerator = np.trapezoid(avg_cross_section * n(a) * a**2, a, axis=0)* 0.75 / avg_mass
+  denominator = np.trapezoid(B, wave, axis=0)
+
+  # 1e4 factor is the correct scale to convert from (um^2 / (g/cm^3 * um^3)) to (cm^2/g)
+  return 1e4 * numerator / denominator
+
 
 
 ########################################################
@@ -345,6 +635,27 @@ def pwr_law(r, slope ,cutoff_low = 0.005, cutoff_high = 2.5, total = 1):
   n[mask] /= total * (used_slope-1.0) * (cutoff_low**(1.0-used_slope)  -  cutoff_high**(1-used_slope))
   return n
 
+
+def M_norm_pwr_law(r, slope ,cutoff_low = 0.005, cutoff_high = 2.5, total = 1):
+  '''
+  Generalised power law function. only valid for negative power laws - will force input to negatives
+
+  radii are to be given in micrometers
+
+  r      ==   radius of dust grain [um]     - array
+  slope  ==   power law of dist (negative)  - float
+  '''
+
+  used_slope = abs(float(slope))
+
+  n = np.zeros(len(r))
+
+  mask = np.where((cutoff_low <= r) & (r < cutoff_high))
+  n[mask] = r[mask]**(-used_slope)
+
+  #Normilize so integral goes to "total"
+  n[mask] /= total * (used_slope-4.0) * (cutoff_low**(4.0-used_slope)  -  cutoff_high**(4-used_slope))
+  return n
 
 ########################################################
 #Stuff for making an interpolatable set of mie data
